@@ -4,8 +4,11 @@ import igl
 import numpy as np
 import polyscope as ps
 import scipy.sparse as sparse
+import scipy.spatial.transform as transform
 
-from tools import to_vtk
+from tools import to_vtk, area
+import HHD_explicit_CORE as ExplCore
+import HHD_implicit_CORE as Core
 
 comparison = False
 
@@ -14,9 +17,9 @@ V,_,_,F,_,_ = igl.read_obj("Objects/{}.obj".format(s))
 if comparison:
     V,_,_,F,_,_ = igl.read_obj("ls.obj")
 E = igl.edges(F)
-f = F.shape[0]
-e = E.shape[0]
-v = V.shape[0]
+n_f = f = F.shape[0]
+n_e = e = E.shape[0]
+n_v = v = V.shape[0]
 euler_characteristic = igl.euler_characteristic(F)
 print("vertices: {}".format(v))
 print("edges: {}".format(e))
@@ -66,6 +69,7 @@ for nf,face in enumerate(F):
     
 G_V = G_V.tocsc()
 M_X_inv = sparse.diags(1/M_X, 0, format="csc")
+M_X_sqrt = sparse.diags(np.sqrt(M_X), 0, format="csc")
 M_X = sparse.diags(M_X, 0, format="csc")
 D = G_V.transpose() @ M_X
 
@@ -83,6 +87,11 @@ for ne,edge in enumerate(E):
     k,l = neighbors[0], neighbors[1]
     nf1 = pts_to_face[frozenset([i,j,k])]
     nf2 = pts_to_face[frozenset([i,j,l])]
+    
+    #check orientation
+    if np.array_equal(edge, F[nf1][[1,0]]) or np.array_equal(edge, F[nf1][[2,1]]) or np.array_equal(edge, F[nf1][[0,2]]):
+        nf1, nf2 = nf2, nf1
+        
     C[ne,3*nf1:3*nf1+3] = vec
     C[ne,3*nf2:3*nf2+3] = -vec
 
@@ -95,6 +104,36 @@ if comparison:
     load = np.load("fields.npz")
     i_input, i_grad_f, i_curl_g, i_h = load['arr_0'], load['arr_1'], load['arr_2'], load['arr_3']
     v_field = i_input.flatten()
+    
+# =============================================================================
+# rotated co-gradient
+# =============================================================================
+E_index = dict()
+for i,e in enumerate(E):
+    E_index[frozenset(list(e))] = i
+    
+G_F = sparse.lil_matrix((3*n_f, n_e))
+J = sparse.lil_matrix((3*n_f,3*n_f))
+edges_of_face = [[0,1],[1,2],[2,0]]
+for nf,face in enumerate(F):
+    i,j,k = face[0], face[1], face[2]
+    pi,pj,pk = V[i], V[j], V[k]
+    n = np.cross(pj-pi, pk-pi)
+    n /= np.linalg.norm(n)
+    J[3*nf:3*nf+3,3*nf:3*nf+3] = transform.Rotation.from_rotvec(n * np.pi/2).as_matrix()
+    
+    dual_tri = []
+    dual_tri_pts = []
+    for ne in edges_of_face:
+        dual_tri.append(E_index[frozenset(face[ne])])
+        dual_tri_pts.append(V[face[ne]].mean(axis=0))
+    dual_tri_pts = np.array(dual_tri_pts)
+    pi,pj,pk = dual_tri_pts[0], dual_tri_pts[1], dual_tri_pts[2]
+    G_F[3*nf:3*nf+3, dual_tri[0]] = np.cross(n, pk-pj) / (2*a)
+    G_F[3*nf:3*nf+3, dual_tri[1]] = np.cross(n, pi-pk) / (2*a)
+    G_F[3*nf:3*nf+3, dual_tri[2]] = np.cross(n, pj-pi) / (2*a)
+G_F = G_F.tocsc()   
+J = J.tocsc()
 
 # =============================================================================
 # helmholz hodge
@@ -115,9 +154,14 @@ curl_g = JG_E @ hh_g
 hh_h = v_field - grad_f - curl_g
 print("harmonic part mean absolute value:", np.abs(hh_h).mean())
 
+H = sparse.vstack([D, C])
+hh_h = Core.cstr_lsqr_diag((M_X_sqrt, M_X_inv), v_field, H)
+
 # test = np.concatenate((G_V, JG_E), axis=1)
 # rk = np.linalg.matrix_rank(test)
 # print("H nullspace:", 2*f-rk)
+
+cograd_g = J @ G_F @ hh_g
 
 # =============================================================================
 # implicit to explicit
@@ -147,13 +191,13 @@ if comparison:
 
 ps.init()
 
-ps_points = ps.register_point_cloud("Points", V)
+ps_points = ps.register_point_cloud("Points", V, enabled=False)
 ps_mesh = ps.register_surface_mesh("Triangles", V, F)
 ps_mesh.set_back_face_policy("identical")
 ps_mesh.add_scalar_quantity("Potential", hh_f, defined_on="vertices", enabled=True)
 
 ps_edges = ps.register_curve_network("Edges", V, E)
-ps_edges.add_scalar_quantity("Curl Potential", np.abs(hh_g), defined_on='edges')
+ps_edges.add_scalar_quantity("Curl Potential", hh_g, defined_on='edges')
 
 disp_grad = np.array(np.split(grad_f,f))
 disp_curl = np.array(np.split(curl_g,f))
@@ -164,6 +208,7 @@ to_vtk("Results/{}".format(s), V, F, [disp_v, disp_grad, disp_curl, disp_harm], 
     
 ps_mesh.add_vector_quantity("Gradient", disp_grad, defined_on="faces", enabled=True, color=(0,0,1))
 ps_mesh.add_vector_quantity("Curl", disp_curl, defined_on="faces", enabled=True, color=(1,0,0))
+ps_mesh.add_vector_quantity("Cograd", np.array(np.split(cograd_g,f)), defined_on="faces", enabled=True, color=(1,.5,.5))
 ps_mesh.add_vector_quantity("Harmonic", disp_harm, defined_on="faces", enabled=True, color=(0,.7,0))
 ps_mesh.add_vector_quantity("v field", disp_v, defined_on="faces", enabled=True, color=(0.,0.,0.))
 if comparison:

@@ -3,6 +3,7 @@
 import gudhi
 import igl
 import numpy as np
+import scipy.linalg as linalg
 import scipy.sparse as sparse
 import scipy.spatial.transform as transform
 import tetgen
@@ -100,7 +101,6 @@ def compute_gradient_operator(V, T, phi):
     n_T = T.shape[0]
     
     G_V = sparse.lil_matrix((3*n_T, n_V))
-    A_phi = sparse.lil_matrix((n_T, n_V))
     M_X = np.zeros((3*n_T))
 
     for n,tet in enumerate(T):
@@ -125,15 +125,12 @@ def compute_gradient_operator(V, T, phi):
         
         for i in range(4):
             current = G_V_phi[3*n:3*n+3,tet[i]].toarray().flatten()
-            G_V_phi[3*n:3*n+3,tet[i]] = current - np.dot(current, nt) * nt
-        
-        for i in range(4):
-            A_phi[n,tet[i]] = np.dot(G_V[3*n:3*n+3,tet[i]].toarray().flatten(), nt)    
+            G_V_phi[3*n:3*n+3,tet[i]] = current - np.dot(current, nt) * nt 
         
     G_V = G_V.tocsc()
     G_V_phi = G_V_phi.tocsc()
     
-    return G_V, G_V_phi, M_X, grad_phi, A_phi
+    return G_V, G_V_phi, M_X, grad_phi
 
 
 def generate_tangent_vector_field(V, T, grad_phi):
@@ -154,10 +151,23 @@ def compute_curl_operator(V, Fi, T, grad_phi, tri_tet_adj):
     n_T = T.shape[0]
     C = sparse.lil_matrix((n_Fi,3*n_T))
 
+    c1 = c2 = 0
     for n,face in enumerate(Fi):
         neighbors = tri_tet_adj[n]
         assert(len(neighbors) == 2)
         nt1,nt2 = neighbors[0], neighbors[1]
+        
+        i,j,k = face[0], face[1], face[2]
+        normal_face = np.cross(V[j]-V[i], V[k]-V[i])
+        
+        #check orientation
+        for pt in T[nt1]:
+            if pt not in face:
+                p1 = pt
+                break
+        if np.dot(V[p1]-V[i], normal_face) < 0.:
+            c1 += 1
+            nt1, nt2 = nt2, nt1
         
         a = area(V[face])
         gphi1 = grad_phi[3*nt1:3*nt1+3]
@@ -165,14 +175,28 @@ def compute_curl_operator(V, Fi, T, grad_phi, tri_tet_adj):
         vec = np.cross(gphi1, gphi2)
         vec /= np.linalg.norm(vec)
         
+        test = np.dot(gphi1, np.cross(vec, normal_face))
+        if test < 0.:
+            c2 += 1
+            vec = -vec
+            
+        for pt in T[nt1]:
+            if pt not in face:
+                p1 = pt
+                break
+        assert(np.dot(V[p1]-V[i], normal_face) > 0.)
+        assert(np.dot(gphi1, np.cross(vec, normal_face)) > 0.)
+        
         C[n,3*nt1:3*nt1+3] = a * vec
         C[n,3*nt2:3*nt2+3] = -a * vec
+        
+    print(c1, c2, n_Fi)
 
     C = C.tocsc()
     return C
 
 
-def compute_level_set(V, T, phi, l, v_field):
+def compute_level_set(V, T, phi, grad_phi, l, v_field):
     i_pts = []
     i_tri = []
     i_input = []
@@ -185,6 +209,11 @@ def compute_level_set(V, T, phi, l, v_field):
             i_edges_set[frozenset(e)] = [tet]
         else:
             i_edges_set[frozenset(e)].append(tet)
+            
+    def orient_triangle(tri, normal):
+        if np.dot(normal, np.cross(i_pts[tri[1]] - i_pts[tri[0]], i_pts[tri[2]] - i_pts[tri[0]])) < 0.:
+            return tri[[0,2,1]]
+        return tri
 
     for n,tet in enumerate(T):
         p, e, coords = intersection(V, tet, phi, l)
@@ -202,15 +231,15 @@ def compute_level_set(V, T, phi, l, v_field):
         loc_input = v_field[3*n:3*n+3]
         
         if len(p) == 3:
-            i_tri.append(ptsidx)
+            i_tri.append(orient_triangle(ptsidx, grad_phi[3*n:3*n+3]))
             i_input.append(loc_input)
             for e in edges_of_tri:
                 add_i_edge(ptsidx[e], tet)
                 
         elif len(p) == 4:
-            i_tri.append(ptsidx[:3])
+            i_tri.append(orient_triangle(ptsidx[:3], grad_phi[3*n:3*n+3]))
             i_input.append(loc_input)
-            i_tri.append(ptsidx[1:])
+            i_tri.append(orient_triangle(ptsidx[1:], grad_phi[3*n:3*n+3]))
             i_input.append(loc_input)
             for e in edges_of_quad:
                 add_i_edge(ptsidx[e], tet)
@@ -256,7 +285,7 @@ def compute_Bg_interpolator(i_pts, i_edges_set, V, F, F_index):
     return B_g, i_edges
 
 
-def compute_gradientF_operator(V, F, F_index, T):
+def compute_gradientF_operator(V, F, F_index, T, grad_phi):
     n_F = F.shape[0]
     n_T = T.shape[0]
     G_F = sparse.lil_matrix((3*n_T, n_F))
@@ -273,9 +302,17 @@ def compute_gradientF_operator(V, F, F_index, T):
         G_F[3*n:3*n+3,dual_tet[1]] = np.cross(p3-p2,p0-p2) / (6*vol)
         G_F[3*n:3*n+3,dual_tet[2]] = np.cross(p3-p0,p1-p0) / (6*vol)
         G_F[3*n:3*n+3,dual_tet[3]] = np.cross(p1-p0,p2-p0) / (6*vol)
+        
+    G_F_phi = G_F.copy()
+    for n,tet in enumerate(T):
+        nt = grad_phi[3*n:3*n+3]
+        for i in range(4):
+            current = G_F_phi[3*n:3*n+3,tet[i]].toarray().flatten()
+            G_F_phi[3*n:3*n+3,tet[i]] = current - np.dot(current, nt) * nt 
     
     G_F = G_F.tocsc()
-    return G_F
+    G_F_phi = G_F_phi.tocsc()
+    return G_F, G_F_phi
     
 
 def compute_rotation_operator(T, grad_phi):
@@ -287,3 +324,9 @@ def compute_rotation_operator(T, grad_phi):
         
     J = J.tocsc() 
     return J
+
+
+def cstr_lsqr_diag(mats, v, H):
+    M_sqrt, M_inv = mats
+    
+    return v - M_inv @ H.T @ sparse.linalg.spsolve(H @ M_inv @ H.T, H @ v)

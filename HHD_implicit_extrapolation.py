@@ -12,7 +12,7 @@ from HHD_explicit_CORE import HHD_explicit
 import HHD_implicit_CORE as Core
 
 s = "Objects/pillowbox1.obj"
-s = "torus"
+s = "sphere"
 
 if s == "sphere":
     b = [1,0,1]
@@ -67,7 +67,7 @@ print_elapsed("Mesh processing")
 # M_X     : (3*n_T)
 # v_field : (3*n_T)
 # =============================================================================
-G_V, G_V_phi, M_X, grad_phi, A_phi = Core.compute_gradient_operator(V, T, phi)
+G_V, G_V_phi, M_X, grad_phi = Core.compute_gradient_operator(V, T, phi)
 
 M_X_inv = sparse.diags(1/M_X, 0, format="csc")
 M_X_sqrt = sparse.diags(np.sqrt(M_X/np.sum(M_X)), 0, format="csc")
@@ -87,28 +87,37 @@ C = Core.compute_curl_operator(V, Fi, T, grad_phi, tri_tet_adj)
 print_elapsed("C computation")
 
 # =============================================================================
-# level set
+# level set and explicit
 # =============================================================================
-i_pts, i_tri, i_input, i_edges_set, Bf_construction = Core.compute_level_set(V, T, phi, l, v_field)
+i_pts, i_tri, i_input, i_edges_set, Bf_construction = Core.compute_level_set(V, T, phi, grad_phi, l, v_field)
 
 B_f = Core.compute_Bf_interpolator(i_pts, V, Bf_construction)
 B_g, i_edges = Core.compute_Bg_interpolator(i_pts, i_edges_set, V, F, F_index)
 
 print_elapsed("Level-set")
 
+explicit = True
+if explicit:
+    hh_f0_, grad_f0_, hh_g0_, curl_g0_, hh_h0, G0_V, C0 = HHD_explicit(i_pts, i_edges, i_tri, i_input.flatten())
+    n_F0 = i_tri.shape[0]
+    
+    print_elapsed("Explicit HHD")
+
 # =============================================================================
 # exact resolution
 # =============================================================================
-
 l = 1
 
 A_f = sparse.vstack((M_X_sqrt@(G_V_phi-G_V),
                      np.sqrt(l)*B_f))
-P_f = l * np.linalg.inv((A_f.T@A_f).toarray()) @ B_f.T.toarray()
+# P_f = l * np.linalg.inv((A_f.T@A_f).toarray()) @ B_f.T.toarray()
+P_f = l * linalg.solve((A_f.T@A_f).toarray(), B_f.T.toarray())
 
-hh_f0 = sparse.linalg.lsqr(M_X_sqrt @ G_V_phi @ P_f, M_X_sqrt @ v_field,
-                            damp=.01, x0=np.zeros((i_pts.shape[0]))) [0]
+hh_f0 = sparse.linalg.lsqr(M_X_sqrt @ G_V @ P_f, M_X_sqrt @ v_field) [0]
 hh_f = P_f @ hh_f0
+
+# print(np.abs(B_f @ hh_f - hh_f0).mean())
+# print(np.abs(G_V_phi @ hh_f - G_V @ hh_f).mean())
 # hh_f0 -= hh_f0.mean()
 # hh_f -= hh_f.mean()
 grad_f = G_V_phi @ hh_f
@@ -121,32 +130,42 @@ print_elapsed("Exact Poisson")
 # J   : (3*n_T,3*n_T)
 # =============================================================================
 
-G_F = Core.compute_gradientF_operator(V, F, F_index, T)
+l = 1
+
+hh_f0_, grad_f0_, hh_g0_, curl_g0_, hh_h0, G0_V, C0 = HHD_explicit(i_pts, i_edges, i_tri, i_input.flatten())
+
+G_F, G_F_phi = Core.compute_gradientF_operator(V, F, F_index, T, grad_phi)
 J = Core.compute_rotation_operator(T, grad_phi)
 
-A_g = sparse.vstack((M_X_sqrt @ (J @ G_F - M_X_inv @ C.T @ K),
-                     np.sqrt(l)*B_g))
-P_g = l * np.linalg.inv((A_g.T@A_g).toarray()) @ B_g.T.toarray()
+A_g = sparse.vstack((M_X_sqrt @ J @ G_F - M_X_inv_sqrt @ C.T @ K,
+                      np.sqrt(l)*B_g))
+# A_g = sparse.vstack((M_X_sqrt @ (G_F_phi - G_F),
+#                      np.sqrt(l)*B_g))
 
-hh_g0 = sparse.linalg.lsqr(M_X_inv_sqrt @ C.T @ K @ P_g, M_X_sqrt @ v_field,
-                           damp=.01, x0=np.zeros((i_edges.shape[0]))) [0]
+# P_g = l * np.linalg.inv((A_g.T@A_g).toarray()) @ B_g.T.toarray()
+P_g = l * linalg.solve((A_g.T@A_g).toarray(), B_g.T.toarray())
+
+# hh_g0 = sparse.linalg.lsqr(M_X_inv_sqrt @ C.T @ K @ P_g, M_X_sqrt @ v_field) [0]
+hh_g0 = hh_g0_
 hh_g = P_g @ hh_g0
 curl_g = M_X_inv @ C.T @ K @ hh_g
+curl_g2 = J @ G_F @ hh_g
+
+print(np.abs(curl_g - curl_g2).mean())
+print(np.abs(B_g @ hh_g - hh_g0).mean())
 
 print_elapsed("Co-exact Poisson")
 
 # =============================================================================
-# extrapoling explicit
+# harmonic resolution
 # =============================================================================
+# print((B_f @ G_V_phi.T @ M_X).shape)
+# print((B_g @ C).shape)
+# H = sparse.vstack([B_f @ G_V_phi.T @ M_X, B_g @ C])
+# print("constraints shape:", H.shape)
+# hh_h = Core.cstr_lsqr_diag(Core.cstr_lsqr_diag((M_X_sqrt, M_X_inv), v_field, H))
 
-explicit = False
-if explicit:
-    hh_f0_, grad_f0_, hh_g0_, curl_g0_, hh_h0, G0_V, C0 = HHD_explicit(i_pts, igl.edges(i_tri), i_tri, i_input.flatten())
-    n_F0 = i_tri.shape[0]
-        
-    grad_f0 = G0_V@hh_f0
-    
-    print_elapsed("Explicit HHD")
+
 # =============================================================================
 # polyscope
 # =============================================================================
@@ -154,6 +173,18 @@ if explicit:
 # extrapol_g = P_g @ hh_g0_
 # test_jg = M_X_inv @ C.T @ K @ extrapol_g
 # print(B_g @ extrapol_g - hh_g0_)
+
+midfaces = np.zeros((n_F,3))
+for i,f in enumerate(F):
+    midfaces[i] = V[f].mean(axis=0)
+rho = np.linalg.norm(midfaces, axis=1)
+theta = np.arccos(midfaces[:,2] / rho)
+hh_g = theta
+
+curl_g = sparse.linalg.inv(J) @ M_X_inv @ C.T @ K @ hh_g
+curl_g2 = J @ G_F @ hh_g
+
+# hh_g = C @ v_field
 
 if True:
     ps.init()
@@ -165,22 +196,24 @@ if True:
     
     ps_mesh.add_vector_quantity("v field", i_input, defined_on="faces", color=(0,0,0))
     ps_mesh.add_scalar_quantity("Grad potential", hh_f0, defined_on="vertices")
-    ps_edges.add_scalar_quantity("Curl potential", hh_g0, defined_on="edges")
+    ps_edges.add_scalar_quantity("Curl potential", hh_g0_, defined_on="edges")
     
     if explicit:
-        ps_mesh.add_vector_quantity("Gradient", np.array(np.split(grad_f0,n_F0)), defined_on="faces", color=(0,0,1))
+        ps_mesh.add_vector_quantity("Gradient", np.array(np.split(grad_f0_,n_F0)), defined_on="faces", color=(0,0,1))
         ps_mesh.add_vector_quantity("Curl", np.array(np.split(curl_g0_,n_F0)), defined_on="faces", color=(1,0,0))
         ps_mesh.add_vector_quantity("Harmonic", np.array(np.split(hh_h0,n_F0)), defined_on="faces", color=(0,1,0))
     
-    ps_vol = ps.register_volume_mesh("Tetrahedral mesh", V, tets=T, enabled=False)
+    ps_vol = ps.register_volume_mesh("Tetrahedral mesh", V, tets=T, enabled=True)
     ps_vol.set_transparency(0.5)
     ps_vol.add_vector_quantity("Gradient", np.array(np.split(grad_f,n_T)), defined_on="cells", enabled=False)
     ps_vol.add_vector_quantity("JGradient", np.array(np.split(curl_g,n_T)), defined_on="cells", enabled=True)
+    ps_vol.add_vector_quantity("JGradient2", np.array(np.split(curl_g2,n_T)), defined_on="cells", enabled=False)
     
     ps_V = ps.register_point_cloud("V", V, enabled=False)
     ps_V.add_scalar_quantity("Ambient potential", hh_f)
     
-    ps_mesh2 = ps.register_surface_mesh("Ambient triangles", V, F)
-    ps_mesh2.add_scalar_quantity("Ambient curl potential", hh_g, defined_on='faces')
+    ps_mesh2 = ps.register_surface_mesh("Ambient triangles", V, Fi, enabled=False)
+    ps_mesh2.add_scalar_quantity("Ambient curl potential", K @ hh_g, defined_on='faces')
+    # ps_mesh2.add_vector_quantity("Test", np.array(np.split(test,n_Fi)), defined_on='faces')
     
     ps.show()

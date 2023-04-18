@@ -62,6 +62,11 @@ def HHD_explicit(V, E, F, v_field):
         k,l = neighbors[0], neighbors[1]
         nf1 = pts_to_face[frozenset([i,j,k])]
         nf2 = pts_to_face[frozenset([i,j,l])]
+        
+        #check orientation
+        if np.array_equal(edge, F[nf1][[1,0]]) or np.array_equal(edge, F[nf1][[2,1]]) or np.array_equal(edge, F[nf1][[0,2]]):
+            nf1, nf2 = nf2, nf1
+        
         C[ne,3*nf1:3*nf1+3] = vec
         C[ne,3*nf2:3*nf2+3] = -vec
 

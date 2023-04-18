@@ -5,7 +5,7 @@ import numpy as np
 import polyscope as ps
 import polyscope.imgui as psim
 import scipy.sparse as sparse
-import scipy.optimize as optim
+import scipy.linalg as linalg
 
 from tools import area, volume, print_elapsed
 from level_set import same_sign, not_too_far, intersection, phi_sphere, phi_torus, phi_from_mesh
@@ -31,7 +31,7 @@ l = 0
 # =============================================================================
 # tetrahedral mesh
 # =============================================================================
-V, T = Core.generate_tetmesh(0.001)
+V, T = Core.generate_tetmesh(0.0001)
 phi = phi(V)
 print("Tetrahedral mesh size:", V.shape[0], T.shape[0])
 
@@ -58,7 +58,7 @@ print_elapsed("Mesh processing")
 # =============================================================================
 # gradient
 # =============================================================================
-G_V, G_V_phi, M_X, grad_phi, A_phi = Core.compute_gradient_operator(V, T, phi)
+G_V, G_V_phi, M_X, grad_phi = Core.compute_gradient_operator(V, T, phi)
 
 M_X_inv = sparse.diags(1/M_X, 0, format="csc")
 M_X_sqrt = sparse.diags(np.sqrt(M_X/np.sum(M_X)), 0, format="csc")
@@ -96,31 +96,36 @@ grad_f = G_V_phi @ hh_f
 hh_g = sparse.linalg.lsqr(M_X_inv_sqrt @ C.transpose(), M_X_sqrt @ v_field) [0]
 curl_g = JG_F @ hh_g
 
-# hh_h = v_field - grad_f - curl_g
+print_elapsed("Poisson systems")
 
 # harmonic
 
-if False:
-    A_phi_vec = sparse.lil_matrix((n_T, 3*n_T))
-    for n,tet in enumerate(T):
-        A_phi_vec[n,3*n:3*n+3] = grad_phi[3*n:3*n+3]
-    A_phi_vec = A_phi_vec.tocsc()
-    H = sparse.vstack([D, C, A_phi_vec])
-    print("constraints shape:", H.shape)
-    print("SVD:", sparse.linalg.svds(H, which='SM'))
-    constraint = optim.LinearConstraint(H, 0, 0)
-    
-    def obj(h):
-        return np.linalg.norm(h - v_field)**2
-    
-    hess = 2*sparse.eye(3*n_T)
-    hh_h = optim.minimize(obj, np.zeros(3*n_T), method='trust-constr',
-                          jac=lambda h:2*(h-v_field), hess=lambda h:hess,
-                          constraints=[constraint], options={'verbose': 0}) .x
-else:
-    hh_h = np.zeros_like(grad_f)
+# A_phi_vec = sparse.lil_matrix((n_T, 3*n_T))
+# for n,tet in enumerate(T):
+#     A_phi_vec[n,3*n:3*n+3] = grad_phi[3*n:3*n+3]
+# A_phi_vec = A_phi_vec.tocsc()
+# print("Aphi.Gphi test:", np.abs(A_phi_vec@G_V_phi).max())
+# print("Aphi.JG test:", np.abs(A_phi_vec@JG_F).max())
+# print("Aphi.v test:", np.abs(A_phi_vec@v_field).max())
 
-print_elapsed("HH decomposition")
+H = sparse.vstack([D, C])
+print("constraints shape:", H.shape)
+# print(np.linalg.svd(H.toarray())[1][-10:])
+# ns = linalg.null_space(H.toarray())
+# print(ns.shape)
+# print(ns)
+# print(D.shape, np.linalg.matrix_rank(D.toarray()))
+# print(C.shape, np.linalg.matrix_rank(C.toarray()))
+# print(linalg.null_space(C.toarray()))
+# print("SVD D:", sparse.linalg.svds(D, which='SM')[1])
+# print("SVD C:", sparse.linalg.svds(C, which='SM')[1])
+# print("SVD H:", sparse.linalg.svds(H, which='SM')[1])
+hh_h = Core.cstr_lsqr_diag((M_X_sqrt, M_X_inv), v_field, H)
+
+# hh_h = v_field - grad_f - curl_g
+
+print(np.abs(hh_h).max(), np.abs(hh_h).mean())
+print_elapsed("Harmonic part")
 
 # =============================================================================
 # level set
@@ -196,8 +201,20 @@ print_elapsed("Level-set")
 levelset = 0.
 ps.init()
 
+# vield = []
+# for tet in T:
+#     pt = V[tet].mean(axis=0)
+#     vield.append(pt[0])
+#     vield.append(0)
+#     vield.append(0)
+    
+# vield = np.array(vield)
+
 # ps_vol = ps.register_volume_mesh("Tetrahedral mesh", V, tets=T)
 # ps_vol.add_vector_quantity("Gradient", np.array(np.split(curl_g,n_T)), defined_on="cells", enabled=True)
+
+ps_mesh2 = ps.register_surface_mesh("Ambient triangles", V, Fi)
+ps_mesh2.add_scalar_quantity("Potential", hh_g, defined_on='faces')
 
 def callback():
     global levelset
