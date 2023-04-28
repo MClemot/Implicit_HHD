@@ -57,7 +57,7 @@ print_elapsed("Mesh processing")
 # gradient
 # =============================================================================
 
-G_V, G_V_phi, M_X, grad_phi = Core.compute_gradient_operator(V, T, phi)
+G_V, G_V_phi, _, M_X, grad_phi = Core.compute_gradient_operator(V, T, phi)
 
 M_X_inv = sparse.diags(1/M_X, 0, format="csc")
 M_X = sparse.diags(M_X, 0, format="csc")

@@ -7,6 +7,7 @@ import scipy.linalg as linalg
 import scipy.sparse as sparse
 import scipy.spatial.transform as transform
 import tetgen
+from itertools import combinations
 
 from tools import area, volume, barycentric
 from level_set import same_sign, intersection
@@ -101,6 +102,7 @@ def compute_gradient_operator(V, T, phi):
     n_T = T.shape[0]
     
     G_V = sparse.lil_matrix((3*n_T, n_V))
+    G_C = sparse.lil_matrix((3*n_T, 4*n_T))
     M_X = np.zeros((3*n_T))
 
     for n,tet in enumerate(T):
@@ -109,10 +111,10 @@ def compute_gradient_operator(V, T, phi):
         
         p0,p1,p2,p3 = tet_pts[0], tet_pts[1], tet_pts[2], tet_pts[3]
         
-        G_V[3*n:3*n+3,tet[0]] = np.cross(p3-p1,p2-p1) / (6*vol)
-        G_V[3*n:3*n+3,tet[1]] = np.cross(p3-p2,p0-p2) / (6*vol)
-        G_V[3*n:3*n+3,tet[2]] = np.cross(p3-p0,p1-p0) / (6*vol)
-        G_V[3*n:3*n+3,tet[3]] = np.cross(p1-p0,p2-p0) / (6*vol)
+        G_V[3*n:3*n+3, tet[0]] = G_C[3*n:3*n+3, 4*n  ] = np.cross(p3-p1,p2-p1) / (6*vol)
+        G_V[3*n:3*n+3, tet[1]] = G_C[3*n:3*n+3, 4*n+1] = np.cross(p3-p2,p0-p2) / (6*vol)
+        G_V[3*n:3*n+3, tet[2]] = G_C[3*n:3*n+3, 4*n+2] = np.cross(p3-p0,p1-p0) / (6*vol)
+        G_V[3*n:3*n+3, tet[3]] = G_C[3*n:3*n+3, 4*n+3] = np.cross(p1-p0,p2-p0) / (6*vol)
         
         M_X[3*n:3*n+3] = np.abs(vol)
 
@@ -128,9 +130,10 @@ def compute_gradient_operator(V, T, phi):
             G_V_phi[3*n:3*n+3,tet[i]] = current - np.dot(current, nt) * nt 
         
     G_V = G_V.tocsc()
+    G_C = G_C.tocsc()
     G_V_phi = G_V_phi.tocsc()
     
-    return G_V, G_V_phi, M_X, grad_phi
+    return G_V, G_V_phi, G_C, M_X, grad_phi
 
 
 def generate_tangent_vector_field(V, T, grad_phi):
@@ -150,6 +153,7 @@ def compute_curl_operator(V, Fi, T, grad_phi, tri_tet_adj):
     n_Fi = Fi.shape[0]
     n_T = T.shape[0]
     C = sparse.lil_matrix((n_Fi,3*n_T))
+    C3 = sparse.lil_matrix((3*n_Fi,3*n_T))
 
     c1 = c2 = 0
     for n,face in enumerate(Fi):
@@ -190,10 +194,18 @@ def compute_curl_operator(V, Fi, T, grad_phi, tri_tet_adj):
         C[n,3*nt1:3*nt1+3] = a * vec
         C[n,3*nt2:3*nt2+3] = -a * vec
         
+        C3[3*n  ,3*nt1:3*nt1+3] =  a * vec
+        C3[3*n  ,3*nt2:3*nt2+3] = -a * vec
+        C3[3*n+1,3*nt1:3*nt1+3] =  a * vec
+        C3[3*n+1,3*nt2:3*nt2+3] = -a * vec
+        C3[3*n+2,3*nt1:3*nt1+3] =  a * vec
+        C3[3*n+2,3*nt2:3*nt2+3] = -a * vec
+        
     print(c1, c2, n_Fi)
 
     C = C.tocsc()
-    return C
+    C3 = C3.tocsc()
+    return C, C3
 
 
 def compute_level_set(V, T, phi, grad_phi, l, v_field):
@@ -234,7 +246,7 @@ def compute_level_set(V, T, phi, grad_phi, l, v_field):
             i_tri.append(orient_triangle(ptsidx, grad_phi[3*n:3*n+3]))
             i_input.append(loc_input)
             for e in edges_of_tri:
-                add_i_edge(ptsidx[e], tet)
+                add_i_edge(ptsidx[e], n)
                 
         elif len(p) == 4:
             i_tri.append(orient_triangle(ptsidx[:3], grad_phi[3*n:3*n+3]))
@@ -242,7 +254,7 @@ def compute_level_set(V, T, phi, grad_phi, l, v_field):
             i_tri.append(orient_triangle(ptsidx[1:], grad_phi[3*n:3*n+3]))
             i_input.append(loc_input)
             for e in edges_of_quad:
-                add_i_edge(ptsidx[e], tet)
+                add_i_edge(ptsidx[e], n)
 
     i_pts = np.array(i_pts)
     i_tri = np.array(i_tri)
@@ -261,14 +273,14 @@ def compute_Bf_interpolator(i_pts, V, Bf_construction):
     return B_f
 
 
-def compute_Bg_interpolator(i_pts, i_edges_set, V, F, F_index):
+def compute_Bg_interpolator_from_midfaces(i_pts, i_edges_set, V, F, F_index, T):
     B_g = sparse.lil_matrix((len(i_edges_set), F.shape[0]))
     i_edges = []
     for i,e_ in enumerate(i_edges_set):
         e = list(e_)
         i_edges.append(e)
         mid_edge = i_pts[e].mean(axis=0)
-        tets = i_edges_set[e_]
+        tets = T[i_edges_set[e_]]
         
         for tet in tets:
             faces_indices = []
@@ -278,6 +290,24 @@ def compute_Bg_interpolator(i_pts, i_edges_set, V, F, F_index):
                 mid_faces.append(V[tet[f]].mean(axis=0))
             mid_faces = np.array(mid_faces)
             B_g[i, faces_indices] += barycentric(mid_edge, mid_faces) / len(tets)
+
+    i_edges = np.array(i_edges)
+    B_g = B_g.tocsc()
+    
+    return B_g, i_edges
+
+
+def compute_Bg_interpolator_from_corners(i_pts, i_edges_set, V, T):
+    B_g = sparse.lil_matrix((len(i_edges_set), 4*T.shape[0]))
+    i_edges = []
+    for i,e_ in enumerate(i_edges_set):
+        e = list(e_)
+        i_edges.append(e)
+        mid_edge = i_pts[e].mean(axis=0)
+        tets = i_edges_set[e_]
+        
+        for tet in tets:
+            B_g[i, 4*tet:4*tet+4] += barycentric(mid_edge, V[T[tet]]) / len(tets)
 
     i_edges = np.array(i_edges)
     B_g = B_g.tocsc()
@@ -325,6 +355,25 @@ def compute_rotation_operator(T, grad_phi):
     J = J.tocsc() 
     return J
 
+
+def compute_continuity_operator(V, T):
+    K_list = [[] for v in range(V.shape[0])]
+    for n,tet in enumerate(T):
+        for i in range(4):
+            K_list[tet[i]].append(4*n+i)      
+    k = 0
+    for corners in K_list:
+        k += len(corners) * (len(corners)-1) // 2
+    
+    K = sparse.lil_matrix((k, 4*T.shape[0]))
+    i = 0
+    for corners in K_list:
+        for neighbors in combinations(corners, 2):
+            K[i, neighbors[0]] = 1
+            K[i, neighbors[1]] = -1
+            i += 1
+    
+    return K
 
 def cstr_lsqr_diag(mats, v, H):
     M_sqrt, M_inv = mats
